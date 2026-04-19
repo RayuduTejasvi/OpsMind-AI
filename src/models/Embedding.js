@@ -14,4 +14,7 @@ const embeddingSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+embeddingSchema.index({ docId: 1 });
+embeddingSchema.index({ chunkId: 1 });
+
 export const Embedding = mongoose.model('Embedding', embeddingSchema);
