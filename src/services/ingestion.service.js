@@ -6,6 +6,66 @@ import { extractPdfText } from './pdfParser.service.js';
 import { chunkText } from './chunker.service.js';
 import { generateEmbedding } from './embedding.service.js';
 
+export async function listIndexedDocuments() {
+  return SopDocument.find({}, {
+    filename: 1,
+    originalName: 1,
+    uploadDate: 1,
+    pageCount: 1,
+    chunkCount: 1,
+    status: 1,
+    createdAt: 1,
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+}
+
+export async function deleteDocumentAndEmbeddings(documentId) {
+  const documentRecord = await SopDocument.findById(documentId);
+  if (!documentRecord) {
+    return false;
+  }
+
+  await Embedding.deleteMany({ docId: documentRecord._id });
+  await SopDocument.deleteOne({ _id: documentRecord._id });
+  return true;
+}
+
+export async function reindexDocument(documentId) {
+  const documentRecord = await SopDocument.findById(documentId);
+  if (!documentRecord) {
+    const error = new Error('Document not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  await Embedding.deleteMany({ docId: documentRecord._id });
+
+  const writes = documentRecord.chunks.map(async (chunk) => {
+    const vector = await generateEmbedding(chunk.text);
+    return Embedding.create({
+      docId: documentRecord._id,
+      chunkId: chunk.chunkId,
+      chunkText: chunk.text,
+      page: chunk.page || 1,
+      section: chunk.section || '',
+      filename: documentRecord.filename,
+      vector,
+      embeddingModel: process.env.EMBEDDING_MODEL || 'deterministic-1536',
+    });
+  });
+
+  await Promise.all(writes);
+  documentRecord.status = 'indexed';
+  await documentRecord.save();
+
+  return {
+    message: 'Document reindexed successfully',
+    documentId: documentRecord._id,
+    chunkCount: documentRecord.chunks.length,
+  };
+}
+
 export async function ingestPdfDocument(file) {
   const documentRecord = await SopDocument.create({
     filename: file.filename,
@@ -43,7 +103,7 @@ export async function ingestPdfDocument(file) {
           section: '',
           filename: file.filename,
           vector,
-          embeddingModel: 'placeholder-1536',
+          embeddingModel: process.env.EMBEDDING_MODEL || 'deterministic-1536',
         })
       );
     }
