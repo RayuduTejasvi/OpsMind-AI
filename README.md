@@ -257,6 +257,58 @@ A working demo should include:
 - Hallucination fallback case
 - Admin panel walkthrough
 
+## Run Locally (Backend + Frontend)
+
+### 1) Environment
+
+Create a `.env` in the project root (already supported by the server):
+
+```
+PORT=5000
+MONGO_URI=mongodb://127.0.0.1:27017/opsmind
+JWT_SECRET=local-dev-jwt-secret-change-me
+JWT_REFRESH_SECRET=local-dev-refresh-secret-change-me
+EMBEDDING_MODEL=deterministic-1536
+MAX_FILE_SIZE_MB=50
+FREE_TIER_DAILY_LIMIT=20
+```
+
+### 2) Start backend
+
+```
+npm run dev
+```
+
+Health check:
+
+```
+http://localhost:5000/health
+```
+
+### 3) Start frontend
+
+```
+npm run frontend:dev
+```
+
+Frontend URL:
+
+```
+http://localhost:5173
+```
+
+### 4) Basic flow
+
+1. Register (choose `admin` if you want admin features).
+2. Login.
+3. In Admin tab: upload PDF SOP files.
+4. In Chat tab: ask SOP questions and watch SSE streaming with citations.
+
+### Notes
+
+- Billing endpoints are mocked for local development.
+- Embeddings are deterministic local vectors for a no-key local setup.
+
 ---
 
 *Zaalima Development Pvt. Ltd. - Confidential*
