@@ -1,8 +1,7 @@
 import { randomUUID } from 'crypto';
 import { User } from '../models/User.js';
 import { retrieveRelevantChunks } from './retrieval.service.js';
-
-const FALLBACK_MESSAGE = "I don't have information on this in the current knowledge base.";
+import { FALLBACK_MESSAGE, generateGroundedAnswer } from './llm.service.js';
 
 function buildCitations(chunks) {
   return chunks.map((chunk) => ({
@@ -10,17 +9,6 @@ function buildCitations(chunks) {
     page: chunk.page || 1,
     section: chunk.section || '',
   }));
-}
-
-function buildAnswer(chunks, query) {
-  if (!chunks.length) {
-    return FALLBACK_MESSAGE;
-  }
-
-  const top = chunks[0];
-  const answerBody = top.chunkText.length > 500 ? `${top.chunkText.slice(0, 500)}...` : top.chunkText;
-
-  return `According to ${top.filename}, Page ${top.page || 1}, Section ${top.section || 'N/A'}, ${answerBody}`;
 }
 
 function maybeResetDailyCounter(user) {
@@ -87,7 +75,10 @@ export async function processChatQuery({ user, query, sessionId }) {
   const resolvedSessionId = sessionId || randomUUID();
   const chunks = await retrieveRelevantChunks(normalizedQuery, { limit: 5, scoreThreshold: 0.2 });
   const citations = buildCitations(chunks);
-  const answer = buildAnswer(chunks, normalizedQuery);
+  const answer = await generateGroundedAnswer({
+    query: normalizedQuery,
+    chunks,
+  });
 
   user.queryCountToday += 1;
   await user.save();
