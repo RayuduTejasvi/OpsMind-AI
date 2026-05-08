@@ -16,7 +16,7 @@ body {
   margin: 0;
   font-family: 'IBM Plex Sans', sans-serif;
   color: var(--ink);
-  background: radial-gradient(circle at 20% 10%, #ffd6a8, transparent 35%), radial-gradient(circle at 80% 20%, #b7ebe2, transparent 30%), linear-gradient(120deg, #fff7e5, #f4f1df 45%, #f2e4d9 100%);
+  background: #ffffff;
   min-height: 100vh;
 }
 
@@ -31,9 +31,7 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: repeating-linear-gradient(120deg, rgba(212, 72, 28, 0.08), rgba(212, 72, 28, 0.08) 8px, transparent 8px, transparent 18px);
-  mix-blend-mode: multiply;
-  opacity: 0.45;
+  display: none;
 }
 
 .top-bar {
@@ -98,6 +96,14 @@ h1, h2, h3, h4 {
   max-width: 520px;
 }
 
+.auth-portal-card {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
 .auth-toggle {
   display: flex;
   gap: 10px;
@@ -156,7 +162,8 @@ select {
 
 .sidebar {
   padding: 14px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   align-content: start;
 }
@@ -166,16 +173,44 @@ select {
 }
 
 .session-list {
+  flex: 1;
+  min-height: 0;
   display: grid;
   gap: 8px;
   max-height: 300px;
   overflow: auto;
 }
 
+.session-empty {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  border: 1px dashed #d5c6a3;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.45);
+  color: #7d6a4c;
+  text-align: center;
+  font-size: 0.92rem;
+}
+
 .session-item {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
+}
+
+.session-item > button:first-child {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+
+.session-item > button:last-child {
+  width: 36px;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .content {
