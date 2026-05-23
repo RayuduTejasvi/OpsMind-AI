@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import './styles.css';
 
 const AUTH_STORAGE_KEY = 'opsmind_auth';
 
@@ -6,904 +7,914 @@ function loadAuth() {
   try {
     const raw = localStorage.getItem(AUTH_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
-  } catch (_error) {
-    return null;
-  }
+  } catch { return null; }
 }
-
 function saveAuth(payload) {
-  if (!payload) {
-    localStorage.removeItem(AUTH_STORAGE_KEY);
-    return;
-  }
+  if (!payload) { localStorage.removeItem(AUTH_STORAGE_KEY); return; }
   localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(payload));
 }
 
 async function apiRequest(path, options = {}, accessToken = '') {
   const headers = new Headers(options.headers || {});
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`);
+  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
+  
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  
+  try {
+    const res = await fetch(path, { ...options, headers, signal: controller.signal });
+    clearTimeout(timeout);
+    return res;
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') throw new Error('Request timed out. Is the server running?');
+    throw err;
   }
-
-  const response = await fetch(path, { ...options, headers });
-  return response;
 }
 
 function parseEventBlock(block) {
   const lines = block.split('\n');
-  let event = '';
-  let data = '';
-
+  let event = '', data = '';
   for (const line of lines) {
-    if (line.startsWith('event:')) {
-      event = line.slice(6).trim();
-    } else if (line.startsWith('data:')) {
-      data += line.slice(5).trim();
-    }
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) data += line.slice(5).trim();
   }
-
-  if (!event) {
-    return null;
-  }
-
-  return { event, data };
+  return event ? { event, data } : null;
 }
 
-export default function App() {
-  const [authMode, setAuthMode] = useState('login');
+function getInitials(email) {
+  return email ? email.slice(0, 2).toUpperCase() : '??';
+}
+
+/* ─────────────────────────────────────────
+   AUTH PAGE
+───────────────────────────────────────── */
+function AuthPage({ onAuth }) {
+  const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [registerRole, setRegisterRole] = useState('employee');
-  const [auth, setAuth] = useState(() => loadAuth());
-  const [status, setStatus] = useState('Ready');
-  const [termsAccepted, setTermsAccepted] = useState(false);
-  const [serverHealth, setServerHealth] = useState('checking');
+  const [role, setRole] = useState('employee');
+  const [terms, setTerms] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const [tab, setTab] = useState('chat');
-  const [query, setQuery] = useState('');
-  const [sessionId, setSessionId] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [sessions, setSessions] = useState([]);
-  const [streaming, setStreaming] = useState(false);
-
-  const [documents, setDocuments] = useState([]);
-  const [uploadFiles, setUploadFiles] = useState([]);
-  const [billingInfo, setBillingInfo] = useState(null);
-  const uploadInputRef = useRef(null);
-
-  const isAdmin = auth?.user?.role === 'admin';
-
-  const greeting = useMemo(() => {
-    if (!auth?.user) {
-      return 'Sign in to start asking SOP questions.';
-    }
-    return `Logged in as ${auth.user.email} (${auth.user.role}, ${auth.user.planTier})`;
-  }, [auth]);
-
-  const adminSummary = useMemo(() => {
-    const total = documents.length;
-    const indexed = documents.filter((doc) => String(doc.status || '').toLowerCase().includes('index')).length;
-    const processing = documents.filter((doc) => String(doc.status || '').toLowerCase().includes('process')).length;
-    const errored = documents.filter((doc) => String(doc.status || '').toLowerCase().includes('error')).length;
-
-    return { total, indexed, processing, errored };
-  }, [documents]);
-
-  useEffect(() => {
-    fetch('/health')
-      .then((r) => r.json())
-      .then((data) => setServerHealth(data.status || 'unknown'))
-      .catch(() => setServerHealth('down'));
-  }, []);
-
-  useEffect(() => {
-    saveAuth(auth);
-  }, [auth]);
-
-  async function handleAuthSubmit(event) {
-    event.preventDefault();
-    setStatus('Authenticating...');
-
-    const path = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
-    const payload = authMode === 'login'
-      ? { email, password }
-      : { email, password, role: registerRole };
-
-    const response = await apiRequest(path, {
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    const path = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
+    const payload = mode === 'login' ? { email, password } : { email, password, role };
+    const res = await apiRequest(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-
-    const body = await response.json();
-    if (!response.ok) {
-      setStatus(body.message || 'Authentication failed');
-      return;
-    }
-
-    setAuth(body);
-    setStatus('Authentication successful');
-    setEmail('');
-    setPassword('');
-    await refreshChatHistory(body.accessToken);
-    if (body.user.role === 'admin') {
-      await refreshDocuments(body.accessToken);
-    }
+    const body = await res.json();
+    setLoading(false);
+    if (!res.ok) { setError(body.message || 'Authentication failed'); return; }
+    onAuth(body);
   }
 
-  function logout() {
-    setAuth(null);
-    setMessages([]);
-    setSessions([]);
-    setDocuments([]);
-    setSessionId('');
-    setStatus('Logged out');
-  }
+  return (
+    <div className="auth-page">
+      {/* Left brand panel */}
+      <div className="auth-brand">
+        <div className="auth-brand-grid" />
+        <div className="brand-logo">
+          <div className="brand-logo-icon">
+            <span className="material-symbols-outlined">psychology</span>
+          </div>
+          <span className="brand-logo-name">OpsMind AI</span>
+        </div>
+        <div className="brand-hero">
+          <h2>Operational<br /><span>Intelligence</span><br />at scale.</h2>
+          <p>Eliminate SOP confusion. Get instant, accurate answers from your entire knowledge base with enterprise-grade AI.</p>
+          <div className="brand-stats">
+            <div className="brand-stat">
+              <span className="brand-stat-num">40%</span>
+              <span className="brand-stat-label">Overhead cut</span>
+            </div>
+            <div className="brand-stat">
+              <span className="brand-stat-num">10x</span>
+              <span className="brand-stat-label">Faster lookup</span>
+            </div>
+            <div className="brand-stat">
+              <span className="brand-stat-num">99.9%</span>
+              <span className="brand-stat-label">Uptime</span>
+            </div>
+          </div>
+        </div>
+        <div className="brand-testimonial">
+          <p>"The transition to OpsMind has reduced our operational overhead significantly. Our teams get answers instantly."</p>
+          <div className="brand-testimonial-author">
+            <div className="avatar">SC</div>
+            <div>
+              <div className="brand-testimonial-name">Sarah Chen</div>
+              <div className="brand-testimonial-role">Operations Director, Nexus Corp</div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-  async function refreshChatHistory(token = auth?.accessToken) {
-    if (!token) {
-      return;
-    }
+      {/* Right form panel */}
+      <div className="auth-form-panel">
+        {error && (
+          <div className="toast error">
+            <span className="material-symbols-outlined">error</span>
+            <span style={{ flex: 1 }}>{error}</span>
+            <button className="toast-close" onClick={() => setError('')}>
+              <span className="material-symbols-outlined">close</span>
+            </button>
+          </div>
+        )}
 
-    const response = await apiRequest('/api/chat/history', { method: 'GET' }, token);
-    if (!response.ok) {
-      return;
-    }
+        <div className="auth-card">
+          <div className="auth-card-header">
+            <h1>{mode === 'login' ? 'Welcome back' : 'Create account'}</h1>
+            <p>{mode === 'login' ? 'Sign in to access your workspace.' : 'Join OpsMind AI and streamline your operations.'}</p>
+          </div>
 
-    const body = await response.json();
-    setSessions(body.sessions || []);
-  }
+          <div className="auth-tabs">
+            <button className={`auth-tab ${mode === 'login' ? 'active' : ''}`} onClick={() => setMode('login')}>Sign In</button>
+            <button className={`auth-tab ${mode === 'register' ? 'active' : ''}`} onClick={() => setMode('register')}>Register</button>
+          </div>
 
-  async function refreshDocuments(token = auth?.accessToken) {
-    if (!token || !isAdmin) {
-      return;
-    }
+          <div className="oauth-row">
+            <button className="oauth-btn">
+              <span className="material-symbols-outlined">g_translate</span>
+              Google
+            </button>
+            <button className="oauth-btn">
+              <span className="material-symbols-outlined">terminal</span>
+              SSO
+            </button>
+          </div>
 
-    const response = await apiRequest('/api/admin/documents', { method: 'GET' }, token);
-    const body = await response.json();
-    if (response.ok) {
-      setDocuments(body.documents || []);
-    }
-  }
+          <div className="divider"><span>or continue with email</span></div>
+
+          <form onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label className="form-label">Work Email</label>
+              <div className="form-input-wrap">
+                <span className="material-symbols-outlined">mail</span>
+                <input className="form-input" type="email" placeholder="name@company.com" value={email} onChange={e => setEmail(e.target.value)} required />
+              </div>
+            </div>
+            <div className="form-group">
+              <div className="form-input-row">
+                <label className="form-label" style={{ margin: 0 }}>Password</label>
+                {mode === 'login' && <a className="form-link" href="#">Forgot password?</a>}
+              </div>
+              <div className="form-input-wrap">
+                <span className="material-symbols-outlined">lock</span>
+                <input className="form-input" type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} minLength={8} required />
+              </div>
+            </div>
+            {mode === 'register' && (
+              <div className="form-group">
+                <label className="form-label">Organization Role</label>
+                <select className="form-select" value={role} onChange={e => setRole(e.target.value)}>
+                  <option value="employee">Employee</option>
+                  <option value="admin">Administrator</option>
+                </select>
+              </div>
+            )}
+            {mode === 'register' && (
+              <div className="form-checkbox-row">
+                <input type="checkbox" id="terms" checked={terms} onChange={e => setTerms(e.target.checked)} />
+                <label htmlFor="terms">I agree to the <a href="#">Terms of Service</a> and <a href="#">Privacy Policy</a>.</label>
+              </div>
+            )}
+            <button className="btn btn-primary btn-full" type="submit" disabled={loading || (mode === 'register' && !terms)}>
+              {loading ? 'Authenticating…' : mode === 'login' ? 'Sign in to Workspace' : 'Create Account'}
+            </button>
+          </form>
+
+          <div className="auth-switch">
+            {mode === 'login' ? (
+              <>No account? <button onClick={() => setMode('register')}>Create one free</button></>
+            ) : (
+              <>Already registered? <button onClick={() => setMode('login')}>Sign in</button></>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   CHAT VIEW
+───────────────────────────────────────── */
+function ChatView({ auth, sessionId, setSessionId, messages, setMessages, streaming, setStreaming, setStatus, onSessionsChange }) {
+  const [query, setQuery] = useState('');
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   function appendToken(text) {
-    setMessages((previous) => {
-      if (!previous.length || previous[previous.length - 1].role !== 'assistant') {
-        return [...previous, { role: 'assistant', content: text, citations: [] }];
+    setMessages(prev => {
+      if (!prev.length || prev[prev.length - 1].role !== 'assistant') {
+        return [...prev, { role: 'assistant', content: text, citations: [] }];
       }
-
-      const next = [...previous];
-      const last = { ...next[next.length - 1] };
-      last.content = `${last.content}${text}`;
+      const next = [...prev];
+      const last = { ...next[next.length - 1], content: next[next.length - 1].content + text };
       next[next.length - 1] = last;
       return next;
     });
   }
 
   function appendCitation(citation) {
-    setMessages((previous) => {
-      if (!previous.length || previous[previous.length - 1].role !== 'assistant') {
-        return previous;
-      }
-
-      const next = [...previous];
-      const last = { ...next[next.length - 1] };
-      last.citations = [...(last.citations || []), citation];
+    setMessages(prev => {
+      if (!prev.length || prev[prev.length - 1].role !== 'assistant') return prev;
+      const next = [...prev];
+      const last = { ...next[next.length - 1], citations: [...(next[next.length - 1].citations || []), citation] };
       next[next.length - 1] = last;
       return next;
     });
   }
 
-  async function askQuestion(event) {
-    event.preventDefault();
-    if (!auth?.accessToken || !query.trim() || streaming) {
-      return;
-    }
-
+  async function sendMessage(e) {
+    e?.preventDefault();
+    if (!auth?.accessToken || !query.trim() || streaming) return;
     const question = query.trim();
     setQuery('');
     setStreaming(true);
-    setStatus('Streaming answer...');
-    setMessages((previous) => [...previous, { role: 'user', content: question, citations: [] }]);
+    setStatus('Streaming…');
+    setMessages(prev => [...prev, { role: 'user', content: question, citations: [] }]);
 
-    const response = await apiRequest(
-      '/api/chat',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify({ query: question, session_id: sessionId || undefined }),
-      },
-      auth.accessToken
-    );
+    const res = await apiRequest('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({ query: question, session_id: sessionId || undefined }),
+    }, auth.accessToken);
 
-    if (!response.ok || !response.body) {
-      const body = await response.json().catch(() => ({ message: 'Chat request failed' }));
+    if (!res.ok || !res.body) {
+      const body = await res.json().catch(() => ({}));
       setStatus(body.message || 'Chat request failed');
       setStreaming(false);
       return;
     }
 
-    const reader = response.body.getReader();
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-
     while (true) {
       const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-
+      if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const blocks = buffer.split('\n\n');
       buffer = blocks.pop() || '';
-
       for (const block of blocks) {
         const parsed = parseEventBlock(block);
-        if (!parsed) {
-          continue;
-        }
-
-        if (parsed.event === 'token') {
-          const data = JSON.parse(parsed.data || '{}');
-          appendToken(data.text || '');
-        }
-
-        if (parsed.event === 'citation') {
-          const citation = JSON.parse(parsed.data || '{}');
-          appendCitation(citation);
-        }
-
+        if (!parsed) continue;
+        if (parsed.event === 'token') { const d = JSON.parse(parsed.data || '{}'); appendToken(d.text || ''); }
+        if (parsed.event === 'citation') { appendCitation(JSON.parse(parsed.data || '{}')); }
         if (parsed.event === 'done') {
-          const donePayload = JSON.parse(parsed.data || '{}');
-          setSessionId(donePayload.session_id || sessionId);
-          setStatus(`Answer complete (${donePayload.total_tokens || 0} tokens)`);
+          const d = JSON.parse(parsed.data || '{}');
+          setSessionId(d.session_id || sessionId);
+          setStatus(`Done · ${d.total_tokens || 0} tokens`);
           setStreaming(false);
-          await refreshChatHistory();
+          onSessionsChange();
         }
       }
     }
-
     setStreaming(false);
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  }
+
+  return (
+    <div className="chat-view">
+      <div className="chat-header">
+        <h2>SOP Assistant</h2>
+        <p>Ask questions about your operational procedures and knowledge base</p>
+      </div>
+
+      <div className="chat-messages">
+        {messages.length === 0 && (
+          <div style={{ textAlign: 'center', padding: '48px 24px', color: 'var(--text-3)' }}>
+            <span className="material-symbols-outlined" style={{ fontSize: 40, display: 'block', marginBottom: 12, fontVariationSettings: "'FILL' 0, 'wght' 200, 'GRAD' 0, 'opsz' 48", color: 'var(--text-3)' }}>chat</span>
+            <p style={{ fontSize: '0.88rem', color: 'var(--text-3)' }}>Start a conversation — ask anything about your SOPs</p>
+          </div>
+        )}
+        {messages.map((msg, i) => (
+          <div key={i} className={`msg ${msg.role}`}>
+            <div className="msg-avatar">
+              <span className="material-symbols-outlined">
+                {msg.role === 'user' ? 'person' : 'psychology'}
+              </span>
+            </div>
+            <div className="msg-body">
+              <div className="msg-role">{msg.role === 'user' ? 'You' : 'OpsMind AI'}</div>
+              <div className="msg-content">{msg.content}</div>
+              {(msg.citations || []).length > 0 && (
+                <div className="msg-citations">
+                  {msg.citations.map((c, ci) => (
+                    <span key={ci} className="citation-chip">
+                      <span className="material-symbols-outlined">attach_file</span>
+                      {c.filename} · p.{c.page}{c.section ? ` · §${c.section}` : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        {streaming && (
+          <div className="streaming-indicator">
+            <div className="streaming-dots">
+              <span /><span /><span />
+            </div>
+            OpsMind is thinking…
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="chat-input-area">
+        <div className="chat-input-wrap">
+          <textarea
+            className="chat-input"
+            rows={1}
+            placeholder="Ask anything about your SOPs…"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={streaming}
+          />
+          <button className="chat-send-btn" onClick={sendMessage} disabled={streaming || !query.trim()}>
+            <span className="material-symbols-outlined">send</span>
+          </button>
+        </div>
+        <p style={{ fontSize: '0.72rem', color: 'var(--text-3)', marginTop: 8, paddingLeft: 4 }}>
+          Press Enter to send · Shift+Enter for new line
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   ADMIN VIEW
+───────────────────────────────────────── */
+function AdminView({ auth, documents, onRefresh, setStatus }) {
+  const uploadInputRef = useRef(null);
+  const [uploadFiles, setUploadFiles] = useState([]);
+  const [darkMode, setDarkMode] = useState(false);
+  const [autoIndex, setAutoIndex] = useState(true);
+
+  const summary = useMemo(() => ({
+    total: documents.length,
+    indexed: documents.filter(d => String(d.status || '').toLowerCase().includes('index')).length,
+    processing: documents.filter(d => String(d.status || '').toLowerCase().includes('process')).length,
+    errored: documents.filter(d => String(d.status || '').toLowerCase().includes('error')).length,
+  }), [documents]);
+
+  async function uploadDocuments(e) {
+    e.preventDefault();
+    if (!uploadFiles.length) return;
+    const formData = new FormData();
+    for (const file of uploadFiles) formData.append('file', file);
+    setStatus('Uploading and indexing…');
+    const res = await apiRequest('/api/admin/upload', { method: 'POST', body: formData }, auth.accessToken);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) { setStatus(body.message || 'Upload failed'); return; }
+    setStatus('Documents indexed successfully');
+    setUploadFiles([]);
+    onRefresh();
+  }
+
+  async function removeDocument(id) {
+    const res = await apiRequest(`/api/admin/documents/${id}`, { method: 'DELETE' }, auth.accessToken);
+    if (res.status === 204) { onRefresh(); setStatus('Document deleted'); }
+  }
+
+  async function reindexDocument(id) {
+    setStatus('Reindexing…');
+    const res = await apiRequest(`/api/admin/documents/${id}/reindex`, { method: 'POST' }, auth.accessToken);
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) { setStatus(body.message || 'Reindexed'); onRefresh(); }
+  }
+
+  function getStatusInfo(status) {
+    const s = String(status || '').toLowerCase();
+    if (s.includes('index')) return { cls: 'indexed', label: 'Indexed' };
+    if (s.includes('process')) return { cls: 'processing', label: 'Processing' };
+    if (s.includes('error')) return { cls: 'error', label: 'Error' };
+    return { cls: 'unknown', label: status || 'Unknown' };
+  }
+
+  return (
+    <div className="admin-view">
+      <div className="page-header">
+        <h1>Admin Panel</h1>
+        <p>Manage the knowledge base, API keys, and document processing pipeline.</p>
+      </div>
+
+      {/* Stats */}
+      <div className="stat-grid">
+        <div className="stat-card">
+          <div className="stat-card-icon blue"><span className="material-symbols-outlined">description</span></div>
+          <div className="stat-card-val">{summary.total}</div>
+          <div className="stat-card-label">Total Documents</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card-icon green"><span className="material-symbols-outlined">check_circle</span></div>
+          <div className="stat-card-val">{summary.indexed}</div>
+          <div className="stat-card-label">Indexed</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card-icon amber"><span className="material-symbols-outlined">sync</span></div>
+          <div className="stat-card-val">{summary.processing}</div>
+          <div className="stat-card-label">Processing</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card-icon red"><span className="material-symbols-outlined">error</span></div>
+          <div className="stat-card-val">{summary.errored}</div>
+          <div className="stat-card-label">Errors</div>
+        </div>
+      </div>
+
+      {/* Upload + Config */}
+      <div className="config-grid">
+        {/* Upload */}
+        <div className="panel">
+          <div className="panel-header">
+            <div className="panel-header-left">
+              <span className="material-symbols-outlined">upload_file</span>
+              <div>
+                <h2>Upload Documents</h2>
+                <p>PDF files, max 50MB each</p>
+              </div>
+            </div>
+          </div>
+          <div className="panel-body">
+            <div className="upload-zone" onClick={() => uploadInputRef.current?.click()}>
+              <div className="upload-zone-icon"><span className="material-symbols-outlined">cloud_upload</span></div>
+              <h3>Drop PDF files here</h3>
+              <p>or click to browse</p>
+              <button className="btn btn-ghost" style={{ marginTop: 6, fontSize: '0.8rem', padding: '6px 14px' }}
+                onClick={e => { e.stopPropagation(); uploadInputRef.current?.click(); }}>
+                Browse Files
+              </button>
+            </div>
+            <input ref={uploadInputRef} type="file" multiple accept="application/pdf" className="hidden"
+              style={{ display: 'none' }} onChange={e => setUploadFiles(Array.from(e.target.files || []))} />
+            {uploadFiles.length > 0 && (
+              <form onSubmit={uploadDocuments}>
+                <div className="selected-files">
+                  {uploadFiles.map((f, i) => (
+                    <div key={i} className="selected-file">
+                      <span className="material-symbols-outlined">picture_as_pdf</span>
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--text-3)' }}>
+                        {(f.size / 1024).toFixed(0)}KB
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <button className="btn btn-primary btn-full" type="submit" style={{ marginTop: 12 }}>
+                  <span className="material-symbols-outlined">upload</span>
+                  Upload {uploadFiles.length} file{uploadFiles.length > 1 ? 's' : ''}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+
+        {/* Config */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div className="panel">
+            <div className="panel-header">
+              <div className="panel-header-left">
+                <span className="material-symbols-outlined">key</span>
+                <div><h2>API Configuration</h2></div>
+              </div>
+            </div>
+            <div className="panel-body">
+              <div className="config-row">
+                <label>OpenAI API Key</label>
+                <div className="config-input-wrap">
+                  <input className="config-input" type="password" defaultValue="sk-••••••••••••••••••••••••" readOnly />
+                  <button className="btn-icon btn" title="Show"><span className="material-symbols-outlined" style={{ fontSize: 16 }}>visibility</span></button>
+                </div>
+              </div>
+              <div className="config-row">
+                <label>Base URL</label>
+                <input className="config-input" placeholder="https://api.openai.com/v1" style={{ width: '100%' }} />
+              </div>
+              <button className="btn btn-primary" style={{ width: '100%', marginTop: 4 }}>
+                <span className="material-symbols-outlined">save</span>
+                Save Keys
+              </button>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-header">
+              <div className="panel-header-left">
+                <span className="material-symbols-outlined">settings_suggest</span>
+                <div><h2>System Preferences</h2></div>
+              </div>
+            </div>
+            <div className="panel-body">
+              <div className="toggle-row">
+                <div className="toggle-label">
+                  <h4>Dark Mode</h4>
+                  <p>Switch interface theme</p>
+                </div>
+                <div className={`toggle ${darkMode ? 'on' : ''}`} onClick={() => setDarkMode(!darkMode)}>
+                  <div className="toggle-knob" />
+                </div>
+              </div>
+              <div className="toggle-row">
+                <div className="toggle-label">
+                  <h4>Auto-Indexing</h4>
+                  <p>Index after upload</p>
+                </div>
+                <div className={`toggle ${autoIndex ? 'on' : ''}`} onClick={() => setAutoIndex(!autoIndex)}>
+                  <div className="toggle-knob" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Documents table */}
+      <div className="panel">
+        <div className="panel-header">
+          <div className="panel-header-left">
+            <span className="material-symbols-outlined">database</span>
+            <div>
+              <h2>Knowledge Base Documents</h2>
+              <p>{summary.total} documents · {summary.indexed} indexed</p>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-ghost" style={{ fontSize: '0.8rem', padding: '6px 12px' }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 15 }}>filter_list</span>
+              Filter
+            </button>
+            <button className="btn btn-primary" style={{ fontSize: '0.8rem', padding: '6px 12px' }} onClick={onRefresh}>
+              <span className="material-symbols-outlined" style={{ fontSize: 15 }}>refresh</span>
+              Refresh
+            </button>
+          </div>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Document</th>
+                <th>Upload Date</th>
+                <th>Pages</th>
+                <th>Status</th>
+                <th style={{ textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documents.length === 0 && (
+                <tr><td colSpan={5} style={{ textAlign: 'center', padding: '32px', color: 'var(--text-3)' }}>
+                  No documents yet. Upload PDFs to populate your knowledge base.
+                </td></tr>
+              )}
+              {documents.map(doc => {
+                const { cls, label } = getStatusInfo(doc.status);
+                return (
+                  <tr key={doc._id}>
+                    <td>
+                      <div className="file-cell">
+                        <div className="file-icon"><span className="material-symbols-outlined">picture_as_pdf</span></div>
+                        <div>
+                          <div className="file-name">{doc.originalName}</div>
+                          <div className="file-chunks">{doc.chunkCount || 0} chunks</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>{new Date(doc.createdAt || Date.now()).toLocaleDateString()}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>{doc.pageCount || 0}</td>
+                    <td>
+                      <span className={`status-pill ${cls}`}>
+                        <span className="status-pill-dot" />
+                        {label}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="actions-cell">
+                        <button className="btn btn-icon" title="Reindex" onClick={() => reindexDocument(doc._id)}>
+                          <span className="material-symbols-outlined" style={{ fontSize: 15 }}>sync</span>
+                        </button>
+                        <button className="btn btn-danger" style={{ padding: '6px 8px' }} title="Delete" onClick={() => removeDocument(doc._id)}>
+                          <span className="material-symbols-outlined" style={{ fontSize: 15 }}>delete</span>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="table-footer">
+          <span className="table-footer-count">Showing {documents.length} of {documents.length} documents</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button className="btn btn-icon" disabled style={{ opacity: 0.3, padding: '4px 6px' }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>chevron_left</span>
+            </button>
+            <button className="btn btn-icon" disabled style={{ opacity: 0.3, padding: '4px 6px' }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>chevron_right</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   BILLING VIEW
+───────────────────────────────────────── */
+function BillingView({ auth, setStatus }) {
+  const [billingInfo, setBillingInfo] = useState(null);
+
+  const currentPlan = auth?.user?.planTier || 'free';
+
+  async function createCheckout() {
+    const res = await apiRequest('/api/billing/create-checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan: 'pro' }),
+    }, auth.accessToken);
+    setBillingInfo(await res.json());
+    setStatus('Checkout payload received');
+  }
+
+  async function openPortal() {
+    const res = await apiRequest('/api/billing/portal', { method: 'GET' }, auth.accessToken);
+    setBillingInfo(await res.json());
+    setStatus('Portal payload received');
+  }
+
+  const plans = [
+    {
+      name: 'Free', price: '$0', period: '/mo', current: currentPlan === 'free',
+      features: ['5 queries/day', '2 documents', 'Basic support'],
+    },
+    {
+      name: 'Pro', price: '$49', period: '/mo', featured: true, current: currentPlan === 'pro',
+      features: ['Unlimited queries', '100 documents', 'Priority support', 'API access'],
+    },
+    {
+      name: 'Enterprise', price: 'Custom', period: '', current: currentPlan === 'enterprise',
+      features: ['Unlimited everything', 'Custom deployment', 'SLA guarantee', 'Dedicated support'],
+    },
+  ];
+
+  return (
+    <div className="billing-view">
+      <div className="page-header">
+        <h1>Billing & Plans</h1>
+        <p>Manage your subscription and access billing history.</p>
+      </div>
+
+      <div className="plan-grid">
+        {plans.map(plan => (
+          <div key={plan.name} className={`plan-card ${plan.featured ? 'featured' : ''} ${plan.current ? 'current' : ''}`}>
+            {plan.featured && <div className="plan-badge">Most Popular</div>}
+            <div className="plan-name">{plan.name}</div>
+            <div className="plan-price">
+              <span className="plan-price-num">{plan.price}</span>
+              <span className="plan-price-period">{plan.period}</span>
+            </div>
+            <ul className="plan-features">
+              {plan.features.map(f => (
+                <li key={f}>
+                  <span className="material-symbols-outlined">check</span>
+                  {f}
+                </li>
+              ))}
+            </ul>
+            {plan.current ? (
+              <button className="btn btn-ghost btn-full" disabled style={{ opacity: 0.5 }}>Current Plan</button>
+            ) : plan.name === 'Enterprise' ? (
+              <button className="btn btn-ghost btn-full">Contact Sales</button>
+            ) : (
+              <button className="btn btn-primary btn-full" onClick={createCheckout}>Upgrade to {plan.name}</button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <div className="panel-header-left">
+            <span className="material-symbols-outlined">receipt_long</span>
+            <div><h2>Billing Portal</h2><p>Manage invoices, payment methods, and subscriptions</p></div>
+          </div>
+          <button className="btn btn-ghost" style={{ fontSize: '0.82rem' }} onClick={openPortal}>
+            <span className="material-symbols-outlined" style={{ fontSize: 15 }}>open_in_new</span>
+            Open Portal
+          </button>
+        </div>
+        {billingInfo && (
+          <div className="panel-body">
+            <div className="billing-response">
+              <pre>{JSON.stringify(billingInfo, null, 2)}</pre>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   MAIN APP
+───────────────────────────────────────── */
+export default function App() {
+  const [auth, setAuth] = useState(() => loadAuth());
+  const [tab, setTab] = useState('chat');
+  const [status, setStatus] = useState('Ready');
+  const [serverHealth, setServerHealth] = useState('checking');
+  const [sessions, setSessions] = useState([]);
+  const [sessionId, setSessionId] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [streaming, setStreaming] = useState(false);
+  const [documents, setDocuments] = useState([]);
+
+  const isAdmin = auth?.user?.role === 'admin';
+
+  useEffect(() => {
+    fetch('/health').then(r => r.json()).then(d => setServerHealth(d.status || 'unknown')).catch(() => setServerHealth('down'));
+  }, []);
+
+  useEffect(() => { saveAuth(auth); }, [auth]);
+
+  useEffect(() => {
+    if (auth?.accessToken) {
+      refreshSessions(auth.accessToken);
+      if (auth.user?.role === 'admin') refreshDocuments(auth.accessToken);
+    }
+  }, [auth?.accessToken]);
+
+  async function refreshSessions(token = auth?.accessToken) {
+    if (!token) return;
+    const res = await apiRequest('/api/chat/history', { method: 'GET' }, token);
+    if (res.ok) { const b = await res.json(); setSessions(b.sessions || []); }
+  }
+
+  async function refreshDocuments(token = auth?.accessToken) {
+    if (!token || !isAdmin) return;
+    const res = await apiRequest('/api/admin/documents', { method: 'GET' }, token);
+    const b = await res.json();
+    if (res.ok) setDocuments(b.documents || []);
+  }
+
+  function handleAuth(body) {
+    setAuth(body);
+    setStatus('Authenticated');
+  }
+
+  function logout() {
+    setAuth(null); setMessages([]); setSessions([]); setDocuments([]); setSessionId(''); setStatus('Logged out');
   }
 
   async function loadSession(session) {
     setSessionId(session.sessionId);
     setMessages(session.messages || []);
-    setStatus(`Loaded session ${session.sessionId}`);
+    setTab('chat');
   }
 
-  async function clearSession(targetSessionId) {
-    if (!auth?.accessToken) {
-      return;
-    }
-
-    const response = await apiRequest(`/api/chat/history/${targetSessionId}`, { method: 'DELETE' }, auth.accessToken);
-    if (response.ok) {
-      if (targetSessionId === sessionId) {
-        setSessionId('');
-        setMessages([]);
-      }
-      await refreshChatHistory();
-      setStatus('Session deleted');
+  async function clearSession(sid) {
+    if (!auth?.accessToken) return;
+    const res = await apiRequest(`/api/chat/history/${sid}`, { method: 'DELETE' }, auth.accessToken);
+    if (res.ok) {
+      if (sid === sessionId) { setSessionId(''); setMessages([]); }
+      await refreshSessions();
     }
   }
 
-  async function uploadDocuments(event) {
-    event.preventDefault();
-    if (!auth?.accessToken || !uploadFiles.length) {
-      return;
-    }
-
-    const formData = new FormData();
-    for (const file of uploadFiles) {
-      formData.append('file', file);
-    }
-
-    setStatus('Uploading and indexing...');
-    const response = await apiRequest('/api/admin/upload', {
-      method: 'POST',
-      body: formData,
-    }, auth.accessToken);
-
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      setStatus(body.message || 'Upload failed');
-      return;
-    }
-
-    setStatus('Documents indexed successfully');
-    setUploadFiles([]);
-    await refreshDocuments();
+  function newSession() {
+    setSessionId('');
+    setMessages([]);
+    setTab('chat');
   }
 
-  async function removeDocument(documentId) {
-    if (!auth?.accessToken) {
-      return;
-    }
-
-    const response = await apiRequest(`/api/admin/documents/${documentId}`, { method: 'DELETE' }, auth.accessToken);
-    if (response.status === 204) {
-      await refreshDocuments();
-      setStatus('Document deleted');
-    }
-  }
-
-  async function reindexDocument(documentId) {
-    if (!auth?.accessToken) {
-      return;
-    }
-
-    setStatus('Reindexing document...');
-    const response = await apiRequest(`/api/admin/documents/${documentId}/reindex`, { method: 'POST' }, auth.accessToken);
-    const body = await response.json().catch(() => ({}));
-
-    if (response.ok) {
-      setStatus(body.message || 'Reindexed');
-      await refreshDocuments();
-    }
-  }
-
-  async function createCheckout() {
-    if (!auth?.accessToken) {
-      return;
-    }
-
-    const response = await apiRequest('/api/billing/create-checkout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: 'pro' }),
-    }, auth.accessToken);
-
-    const body = await response.json();
-    setBillingInfo(body);
-    setStatus('Checkout payload received');
-  }
-
-  async function openPortal() {
-    if (!auth?.accessToken) {
-      return;
-    }
-
-    const response = await apiRequest('/api/billing/portal', { method: 'GET' }, auth.accessToken);
-    const body = await response.json();
-    setBillingInfo(body);
-    setStatus('Billing portal payload received');
-  }
-
-  useEffect(() => {
-    if (auth?.accessToken) {
-      refreshChatHistory(auth.accessToken);
-      if (auth.user?.role === 'admin') {
-        refreshDocuments(auth.accessToken);
-      }
-    }
-  }, [auth?.accessToken]);
+  if (!auth) return <AuthPage onAuth={handleAuth} />;
 
   return (
     <div className="app-shell">
-      <div className="aurora" />
-      {auth && (
-        <header className="top-bar">
-          <div>
-            <h1>OpsMind AI</h1>
-            <p>Enterprise SOP Brain</p>
+      {/* Topbar */}
+      <header className="topbar">
+        <div className="topbar-logo">
+          <div className="topbar-logo-icon">
+            <span className="material-symbols-outlined">psychology</span>
           </div>
-          <div className="pill-group">
-            <span className={`pill ${serverHealth === 'ok' ? 'ok' : 'error'}`}>API: {serverHealth}</span>
-            <span className="pill">{greeting}</span>
+          <span className="topbar-logo-name">OpsMind AI</span>
+        </div>
+        <div className="topbar-sep" />
+        <span className="topbar-breadcrumb">
+          {tab === 'chat' ? 'Chat' : tab === 'admin' ? 'Admin Panel' : 'Billing'}
+        </span>
+        <div className="topbar-right">
+          <div className="status-badge">
+            <div className={`status-dot ${serverHealth === 'ok' ? 'ok' : 'error'}`} />
+            API {serverHealth}
           </div>
-        </header>
-      )}
-
-      {!auth && (
-        <section className="w-full max-w-[1000px] grid grid-cols-1 md:grid-cols-2 bg-surface-container-lowest rounded-xl overflow-hidden auth-portal-card border border-outline-variant mx-auto">
-          {/* Left: Branding */}
-          <div className="hidden md:flex flex-col justify-between p-xl bg-primary text-on-primary relative overflow-hidden">
-            <div className="z-10">
-              <div className="flex items-center gap-sm mb-xl">
-                <span className="material-symbols-outlined text-on-primary" style={{ fontVariationSettings: "'FILL' 1" }}>psychology</span>
-                <span className="text-h3 font-h3 tracking-tight">OpsMind AI</span>
-              </div>
-              <h1 className="text-h1 font-h1 mb-md">Operational Intelligence at scale.</h1>
-              <p className="text-body-lg opacity-80 max-w-sm">Simplify complex SOPs and streamline your workspace with our enterprise-grade AI assistant.</p>
+          <div className="status-badge" style={{ display: 'none' }}>{status}</div>
+          <div className="topbar-user">
+            <div className="avatar">{getInitials(auth.user?.email)}</div>
+            <div className="topbar-user-info">
+              <span className="topbar-user-email">{auth.user?.email}</span>
+              <span className="topbar-user-role">{auth.user?.role} · {auth.user?.planTier || 'free'}</span>
             </div>
-            <div className="z-10 bg-white/10 backdrop-blur-md p-lg rounded-lg border border-white/20">
-              <p className="text-label-sm italic opacity-90 mb-sm">"The transition to OpsMind has reduced our operational overhead by 40%."</p>
-              <div className="flex items-center gap-sm">
-                <div className="w-8 h-8 rounded-full bg-secondary-fixed" />
-                <div>
-                  <p className="text-label-sm font-bold">Sarah Chen</p>
-                  <p className="text-[10px] uppercase tracking-wider opacity-70">Operations Director</p>
-                </div>
-              </div>
-            </div>
-            <div className="absolute -bottom-20 -right-20 w-80 h-80 bg-primary-container rounded-full blur-3xl opacity-30" />
-            <div className="absolute top-10 right-10 w-40 h-40 bg-indigo-400 rounded-full blur-3xl opacity-20" />
           </div>
+          <button className="btn btn-icon" onClick={logout} title="Sign out">
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>logout</span>
+          </button>
+        </div>
+      </header>
 
-          {/* Right: Auth Canvas */}
-          <div className="p-xl flex flex-col justify-center">
-            {/* Error Toast */}
-            {(status && (status.toLowerCase().includes('invalid') || status.toLowerCase().includes('failed') || status.toLowerCase().includes('unauthorized'))) && (
-              <div className="fixed top-lg right-lg z-50 flex items-center gap-md bg-error-container text-on-error-container px-lg py-md rounded-xl shadow-lg border border-error/10">
-                <span className="material-symbols-outlined text-[20px]">error</span>
-                <span className="font-label-sm">{status}</span>
-                <button className="ml-sm hover:opacity-70 transition-opacity" onClick={() => setStatus('Ready')}>
-                  <span className="material-symbols-outlined text-[18px]">close</span>
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-section-label">Navigation</div>
+        <button className={`nav-btn ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}>
+          <span className="material-symbols-outlined">chat</span>
+          Chat
+        </button>
+        {isAdmin && (
+          <button className={`nav-btn ${tab === 'admin' ? 'active' : ''}`} onClick={() => setTab('admin')}>
+            <span className="material-symbols-outlined">shield_person</span>
+            Admin Panel
+          </button>
+        )}
+        <button className={`nav-btn ${tab === 'billing' ? 'active' : ''}`} onClick={() => setTab('billing')}>
+          <span className="material-symbols-outlined">credit_card</span>
+          Billing
+        </button>
+
+        <div className="sidebar-divider" />
+
+        <button className="nav-btn" onClick={newSession} style={{ borderColor: 'rgba(79,124,255,0.2)', color: 'var(--accent)' }}>
+          <span className="material-symbols-outlined">add</span>
+          New Session
+        </button>
+
+        <div className="sidebar-section-label" style={{ marginTop: 4 }}>Recent Sessions</div>
+        <div className="sidebar-sessions">
+          {sessions.length === 0 ? (
+            <div className="session-empty-state">No sessions yet.<br />Start a conversation.</div>
+          ) : (
+            sessions.map(s => (
+              <div key={s.sessionId} className="session-btn">
+                <button className="session-load-btn" onClick={() => loadSession(s)}>
+                  {s.sessionId.slice(0, 12)}…
+                </button>
+                <button className="session-del-btn" onClick={() => clearSession(s.sessionId)}>
+                  <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
-            )}
+            ))
+          )}
+        </div>
 
-            {/* Login View */}
-            {authMode === 'login' && (
-              <div className="space-y-lg" id="login-view">
-              <div className="space-y-sm">
-                <h2 className="text-h2 font-h2 text-on-surface">Welcome back</h2>
-                <p className="text-on-surface-variant text-body-md">Enter your credentials to access your workspace.</p>
-              </div>
-              <form className="space-y-md" onSubmit={handleAuthSubmit}>
-                <div className="space-y-xs">
-                  <label className="text-label-sm font-semibold text-on-surface-variant">Email Address</label>
-                  <div className="relative">
-                    <span className="material-symbols-outlined absolute left-md top-1/2 -translate-y-1/2 text-outline text-[20px]">mail</span>
-                    <input value={email} onChange={(e) => setEmail(e.target.value)} className="w-full pl-xl pr-md py-md bg-surface-container-low border border-outline-variant rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all placeholder:text-outline/50" placeholder="name@company.com" type="email" required />
-                  </div>
-                </div>
-                <div className="space-y-xs">
-                  <div className="flex justify-between items-center">
-                    <label className="text-label-sm font-semibold text-on-surface-variant">Password</label>
-                    <a className="text-label-sm text-primary hover:underline" href="#">Forgot Password?</a>
-                  </div>
-                  <div className="relative">
-                    <span className="material-symbols-outlined absolute left-md top-1/2 -translate-y-1/2 text-outline text-[20px]">lock</span>
-                    <input value={password} onChange={(e) => setPassword(e.target.value)} className="w-full pl-xl pr-md py-md bg-surface-container-low border border-outline-variant rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all placeholder:text-outline/50" placeholder="••••••••" type="password" minLength={8} required />
-                  </div>
-                </div>
-                <button className="w-full py-md bg-primary text-on-primary font-semibold rounded-lg hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] duration-150" type="submit">Login to Workspace</button>
-              </form>
+        <div className="sidebar-divider" />
+        <button className="nav-btn danger" onClick={logout}>
+          <span className="material-symbols-outlined">logout</span>
+          Sign Out
+        </button>
+      </aside>
 
-              <div className="relative py-sm">
-                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-outline-variant" /></div>
-                <div className="relative flex justify-center text-label-sm"><span className="bg-surface-container-lowest px-md text-outline">Or continue with</span></div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-md">
-                <button className="flex items-center justify-center gap-sm py-sm border border-outline-variant rounded-lg hover:bg-surface-container-low transition-colors font-label-sm">
-                  <img className="w-4 h-4" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDPIDI5Xx6eog4w23Y4HcRa1BPUcOabYPMvF65OoRNeV-LGJrKzpu8hNtTsCoFi3K0oGjEhNcWDWWDZuvAIdbIwEr0CoG4JeC2TVMN3LrFLD3Zq5SGwanxYWGvUwhbwNNvXhzyH4Bgll-vZakGaXEp-bRAF-Qc0NZm6Y015ccnGUFia2SMLwlc5RTJJ1t4nwSL9ZTEf6VbQVNAlEflA0O3vbFl_3I-givtltU3o_KA2rvmAVxHn887hXZJjG2PSzYcr79xsqcjG_bJp" alt="Google" />
-                  Google
-                </button>
-                <button className="flex items-center justify-center gap-sm py-sm border border-outline-variant rounded-lg hover:bg-surface-container-low transition-colors font-label-sm">
-                  <span className="material-symbols-outlined text-[18px]">terminal</span>
-                  SSO
-                </button>
-              </div>
-
-                <p className="text-center text-body-md text-on-surface-variant pt-md">Don't have an account? <button type="button" className="text-primary font-semibold hover:underline" onClick={() => setAuthMode('register')}>Switch to Register</button></p>
-              </div>
-            )}
-
-            {/* Register View */}
-            {authMode === 'register' && (
-              <div className="space-y-lg" id="register-view">
-                <div className="space-y-sm">
-                  <h2 className="text-h2 font-h2 text-on-surface">Create account</h2>
-                  <p className="text-on-surface-variant text-body-md">Join OpsMind AI and start optimizing your operations.</p>
-                </div>
-                <form className="space-y-md" onSubmit={handleAuthSubmit}>
-                  <div className="space-y-xs">
-                    <label className="text-label-sm font-semibold text-on-surface-variant">Work Email</label>
-                    <input value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-md py-md bg-surface-container-low border border-outline-variant rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all" placeholder="name@company.com" type="email" required />
-                  </div>
-                  <div className="space-y-xs">
-                    <label className="text-label-sm font-semibold text-on-surface-variant">Password</label>
-                    <input value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-md py-md bg-surface-container-low border border-outline-variant rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all" placeholder="Create a strong password" type="password" minLength={8} required />
-                  </div>
-                  <div className="space-y-xs">
-                    <label className="text-label-sm font-semibold text-on-surface-variant">Organization Role</label>
-                    <select value={registerRole} onChange={(e) => setRegisterRole(e.target.value)} className="w-full px-md py-md bg-surface-container-low border border-outline-variant rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all appearance-none">
-                      <option value="employee">Employee</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                  </div>
-                  <div className="flex items-start gap-sm py-sm">
-                    <input checked={termsAccepted} onChange={(e) => setTermsAccepted(e.target.checked)} className="mt-1 rounded border-outline-variant text-primary focus:ring-primary" id="terms" type="checkbox" />
-                    <label className="text-[12px] text-on-surface-variant leading-relaxed" htmlFor="terms">I agree to the <a className="text-primary hover:underline" href="#">Terms of Service</a> and <a className="text-primary hover:underline" href="#">Privacy Policy</a>.</label>
-                  </div>
-                  <button disabled={!termsAccepted} className="w-full py-md bg-primary text-on-primary font-semibold rounded-lg hover:bg-primary-container transition-colors shadow-sm active:scale-[0.98] duration-150" type="submit">Register Account</button>
-                </form>
-                <p className="text-center text-body-md text-on-surface-variant pt-md">Already have an account? <button type="button" className="text-primary font-semibold hover:underline" onClick={() => setAuthMode('login')}>Back to Login</button></p>
-              </div>
-            )}
-
-            <div className="fixed bottom-lg left-1/2 -translate-x-1/2 flex items-center gap-xl opacity-40 text-label-sm">
-              <span>© 2024 OpsMind AI Inc.</span>
-              <div className="flex gap-md">
-                <a className="hover:text-primary transition-colors" href="#">Support</a>
-                <a className="hover:text-primary transition-colors" href="#">Privacy</a>
-                <a className="hover:text-primary transition-colors" href="#">Terms</a>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {auth && (
-        <main className="workspace">
-          <aside className="sidebar card">
-            <button type="button" onClick={() => setTab('chat')} className={tab === 'chat' ? 'active' : ''}>Chat</button>
-            {isAdmin && <button type="button" onClick={() => setTab('admin')} className={tab === 'admin' ? 'active' : ''}>Admin</button>}
-            <button type="button" onClick={() => setTab('billing')} className={tab === 'billing' ? 'active' : ''}>Billing</button>
-            <button type="button" onClick={logout}>Logout</button>
-
-            <h3>Sessions</h3>
-            <div className="session-list">
-              {sessions.length === 0 ? (
-                <div className="session-empty">
-                  No saved sessions yet.
-                </div>
-              ) : (
-                sessions.map((session) => (
-                  <div key={session.sessionId} className="session-item">
-                    <button type="button" onClick={() => loadSession(session)}>{session.sessionId.slice(0, 8)}</button>
-                    <button type="button" className="danger" onClick={() => clearSession(session.sessionId)}>x</button>
-                  </div>
-                ))
-              )}
-            </div>
-          </aside>
-
-          <section className="content card">
-            {tab === 'chat' && (
-              <div className="bg-surface-container-lowest p-lg rounded-xl border border-outline-variant shadow-sm">
-                <div className="flex items-center justify-between mb-md">
-                  <div>
-                    <h2 className="font-h3 text-h3">Chat</h2>
-                    <p className="font-label-sm text-label-sm text-on-surface-variant">Ask questions about your SOPs</p>
-                  </div>
-                  <div className="text-sm text-on-surface-variant">{greeting}</div>
-                </div>
-
-                <div className="chat-window mb-md">
-                  {messages.map((message, index) => (
-                    <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
-                      <h4 className="capitalize">{message.role}</h4>
-                      <p>{message.content}</p>
-                      {(message.citations || []).length > 0 && (
-                        <ul>
-                          {message.citations.map((citation, citationIndex) => (
-                            <li key={`${citation.filename}-${citationIndex}`}>
-                              {citation.filename} | Page {citation.page} | Section {citation.section || 'N/A'}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </article>
-                  ))}
-                </div>
-
-                <form onSubmit={askQuestion} className="chat-form">
-                  <input
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Ask anything about SOPs"
-                    disabled={streaming}
-                  />
-                  <button className="bg-primary text-on-primary px-md py-sm rounded-lg" type="submit" disabled={streaming}>{streaming ? 'Streaming...' : 'Send'}</button>
-                </form>
-              </div>
-            )}
-
-            {tab === 'admin' && isAdmin && (
-              <div className="min-h-full bg-background text-on-background">
-                <div className="w-full grid grid-cols-1 xl:grid-cols-[240px_1fr] gap-lg">
-                  <aside className="border border-slate-200 bg-slate-50 flex flex-col p-4 space-y-6 rounded-xl">
-                    <div className="space-y-1">
-                      <div className="text-indigo-600 font-black uppercase tracking-widest text-xs mb-1">Workspace</div>
-                      <div className="text-slate-500 text-[11px] font-medium px-1">Operational Intel</div>
-                    </div>
-                    <nav className="flex-1 space-y-1">
-                      <button type="button" className="w-full flex items-center gap-3 px-3 py-2 text-slate-600 hover:bg-slate-200/50 rounded-lg transition-all text-[13px] leading-relaxed text-left">
-                        <span className="material-symbols-outlined">chat_bubble</span>
-                        <span>Sessions</span>
-                      </button>
-                      <button type="button" className="w-full flex items-center gap-3 px-3 py-2 text-slate-600 hover:bg-slate-200/50 rounded-lg transition-all text-[13px] leading-relaxed text-left">
-                        <span className="material-symbols-outlined">database</span>
-                        <span>Knowledge Base</span>
-                      </button>
-                      <button type="button" className="w-full flex items-center gap-3 px-3 py-2 bg-indigo-50 text-indigo-700 border-l-4 border-indigo-600 rounded-r-lg font-semibold text-[13px] leading-relaxed text-left">
-                        <span className="material-symbols-outlined">shield_person</span>
-                        <span>Admin Panel</span>
-                      </button>
-                      <button type="button" className="w-full flex items-center gap-3 px-3 py-2 text-slate-600 hover:bg-slate-200/50 rounded-lg transition-all text-[13px] leading-relaxed text-left">
-                        <span className="material-symbols-outlined">settings</span>
-                        <span>Settings</span>
-                      </button>
-                    </nav>
-                    <button type="button" onClick={() => setTab('chat')} className="bg-indigo-600 text-white rounded-lg px-4 py-2.5 flex items-center justify-center gap-2 font-semibold text-[13px] shadow-sm hover:opacity-90 transition-opacity border-0">
-                      <span className="material-symbols-outlined text-[18px]">add</span>
-                      New Session
-                    </button>
-                    <div className="pt-4 border-t border-slate-200">
-                      <button type="button" className="w-full flex items-center gap-3 px-3 py-2 text-slate-600 hover:bg-slate-200/50 rounded-lg transition-all text-[13px] leading-relaxed text-left">
-                        <span className="material-symbols-outlined">help</span>
-                        <span>Help Center</span>
-                      </button>
-                    </div>
-                  </aside>
-
-                  <div className="flex flex-col gap-lg">
-                    <header className="bg-white border border-slate-200 shadow-sm flex justify-between items-center w-full px-6 py-2 h-14 rounded-xl">
-                      <div className="flex items-center gap-4">
-                        <div className="text-lg font-bold tracking-tight text-slate-900">OpsMind AI</div>
-                        <div className="h-6 w-[1px] bg-slate-200 mx-2" />
-                        <div className="flex items-center bg-slate-100 rounded-full px-3 py-1.5 gap-2 w-64">
-                          <span className="material-symbols-outlined text-slate-400 text-[18px]">search</span>
-                          <input className="bg-transparent border-none focus:ring-0 text-sm w-full p-0" placeholder="Search operational intel..." type="text" />
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <button type="button" className="p-2 text-slate-500 hover:bg-slate-50 rounded-full transition-colors border-0 bg-transparent">
-                          <span className="material-symbols-outlined">account_circle</span>
-                        </button>
-                        <button type="button" onClick={logout} className="p-2 text-slate-500 hover:bg-slate-50 rounded-full transition-colors border-0 bg-transparent">
-                          <span className="material-symbols-outlined">logout</span>
-                        </button>
-                      </div>
-                    </header>
-
-                    <main className="flex-1 overflow-y-auto space-y-lg">
-                      <div className="flex flex-col gap-sm">
-                        <h1 className="font-h1 text-h1 text-on-surface">Admin Panel</h1>
-                        <p className="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">Manage your organization's knowledge base, API configurations, and document processing pipeline.</p>
-                      </div>
-
-                      <div className="grid grid-cols-1 lg:grid-cols-12 gap-lg">
-                        <section className="lg:col-span-4 flex flex-col gap-md">
-                          <div className="bg-surface-container-lowest p-lg rounded-xl border border-outline-variant shadow-sm flex flex-col gap-md h-full">
-                            <div className="flex items-center gap-sm">
-                              <span className="material-symbols-outlined text-primary">upload_file</span>
-                              <h2 className="font-h3 text-h3">Upload Documents</h2>
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={() => uploadInputRef.current?.click()}
-                              className="border-2 border-dashed border-outline-variant rounded-xl p-xl flex flex-col items-center justify-center text-center gap-sm bg-surface-container-low hover:bg-surface-container transition-colors cursor-pointer group"
-                            >
-                              <span className="material-symbols-outlined text-primary text-[48px] mb-2 group-hover:scale-110 transition-transform">cloud_upload</span>
-                              <div className="font-h3 text-h3 text-on-surface">Drop PDF files here</div>
-                              <p className="font-label-sm text-label-sm text-on-surface-variant">Max file size: 50MB. PDFs only.</p>
-                              <span className="mt-sm bg-primary text-on-primary px-lg py-sm rounded-lg font-medium text-body-md shadow-sm">Browse Files</span>
-                            </button>
-
-                            <input
-                              ref={uploadInputRef}
-                              className="hidden"
-                              type="file"
-                              multiple
-                              accept="application/pdf"
-                              onChange={(event) => setUploadFiles(Array.from(event.target.files || []))}
-                            />
-
-                            {uploadFiles.length > 0 && (
-                              <form onSubmit={uploadDocuments}>
-                                <button type="submit" className="w-full bg-inverse-surface text-inverse-on-surface py-sm rounded-lg font-medium hover:opacity-90 transition-opacity">Upload {uploadFiles.length} file(s)</button>
-                              </form>
-                            )}
-
-                            <div className="space-y-base">
-                              <div className="flex justify-between items-center px-base">
-                                <span className="font-label-sm text-label-sm text-on-surface-variant">{uploadFiles[0]?.name || 'No file selected'}</span>
-                                <span className="font-label-sm text-label-sm text-primary">{uploadFiles.length ? 'Ready' : '0%'}</span>
-                              </div>
-                              <div className="w-full bg-surface-container rounded-full h-1.5 overflow-hidden">
-                                <div className={`bg-primary h-full ${uploadFiles.length ? 'w-full' : 'w-0'}`} style={{ transition: 'width 0.3s ease' }} />
-                              </div>
-                            </div>
-                          </div>
-                        </section>
-
-                        <section className="lg:col-span-8 flex flex-col gap-lg">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-lg h-full">
-                            <div className="bg-surface-container-lowest p-lg rounded-xl border border-outline-variant shadow-sm flex flex-col gap-md">
-                              <div className="flex items-center gap-sm">
-                                <span className="material-symbols-outlined text-primary">key</span>
-                                <h2 className="font-h3 text-h3">API Configuration</h2>
-                              </div>
-                              <div className="space-y-md">
-                                <div className="space-y-xs">
-                                  <label className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">OpenAI API Key</label>
-                                  <div className="flex gap-sm">
-                                    <input className="flex-1 bg-surface-container-low border border-outline-variant rounded-lg px-md py-sm font-code text-code focus:ring-2 focus:ring-primary focus:border-transparent outline-none" type="password" value="sk-••••••••••••••••••••••••" readOnly />
-                                    <button type="button" className="p-2 text-primary hover:bg-primary-fixed rounded-lg transition-colors border-0 bg-transparent">
-                                      <span className="material-symbols-outlined">visibility</span>
-                                    </button>
-                                  </div>
-                                </div>
-                                <div className="space-y-xs">
-                                  <label className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Base URL</label>
-                                  <input className="w-full bg-surface-container-low border border-outline-variant rounded-lg px-md py-sm font-body-md focus:ring-2 focus:ring-primary focus:border-transparent outline-none" placeholder="https://api.openai.com/v1" type="text" />
-                                </div>
-                                <button type="button" className="w-full bg-inverse-surface text-inverse-on-surface py-sm rounded-lg font-medium hover:opacity-90 transition-opacity">Save Keys</button>
-                              </div>
-                            </div>
-
-                            <div className="bg-surface-container-lowest p-lg rounded-xl border border-outline-variant shadow-sm flex flex-col gap-md">
-                              <div className="flex items-center gap-sm">
-                                <span className="material-symbols-outlined text-primary">settings_suggest</span>
-                                <h2 className="font-h3 text-h3">System Preferences</h2>
-                              </div>
-                              <div className="space-y-lg py-md">
-                                <div className="flex justify-between items-center">
-                                  <div>
-                                    <div className="font-body-md font-semibold text-on-surface">Dark Mode</div>
-                                    <div className="font-label-sm text-label-sm text-on-surface-variant">Switch between light and dark interface</div>
-                                  </div>
-                                  <div className="w-12 h-6 bg-surface-container-highest rounded-full p-1 relative flex items-center shadow-inner">
-                                    <div className="w-4 h-4 bg-white rounded-full shadow-sm translate-x-0" />
-                                  </div>
-                                </div>
-                                <div className="flex justify-between items-center">
-                                  <div>
-                                    <div className="font-body-md font-semibold text-on-surface">Auto-Indexing</div>
-                                    <div className="font-label-sm text-label-sm text-on-surface-variant">Automatically index documents after upload</div>
-                                  </div>
-                                  <div className="w-12 h-6 bg-primary-container rounded-full p-1 relative flex items-center shadow-inner">
-                                    <div className="w-4 h-4 bg-white rounded-full shadow-sm translate-x-6" />
-                                  </div>
-                                </div>
-                              </div>
-                              <div className="mt-auto p-md bg-secondary-container rounded-lg border border-outline-variant flex items-start gap-sm">
-                                <span className="material-symbols-outlined text-secondary">info</span>
-                                <p className="font-label-sm text-label-sm text-on-secondary-container">Your changes are automatically synced across the operational workspace.</p>
-                              </div>
-                            </div>
-                          </div>
-                        </section>
-                      </div>
-
-                      <section className="bg-surface-container-lowest rounded-xl border border-outline-variant shadow-sm overflow-hidden">
-                        <div className="p-lg border-b border-outline-variant flex flex-col md:flex-row md:items-center justify-between gap-md">
-                          <div className="flex flex-col">
-                            <h2 className="font-h2 text-h2 text-on-surface">Knowledge Base Documents</h2>
-                            <p className="font-label-sm text-label-sm text-on-surface-variant">Managing {adminSummary.total} documents ({adminSummary.indexed} indexed, {adminSummary.processing} processing, {adminSummary.errored} errors).</p>
-                          </div>
-                          <div className="flex gap-sm">
-                            <button type="button" className="flex items-center gap-xs px-md py-sm border border-outline-variant rounded-lg font-medium text-body-md hover:bg-surface-container transition-colors bg-transparent">
-                              <span className="material-symbols-outlined text-[20px]">filter_list</span>
-                              Filter
-                            </button>
-                            <button type="button" onClick={() => refreshDocuments()} className="flex items-center gap-xs px-md py-sm bg-primary text-on-primary rounded-lg font-medium text-body-md hover:opacity-90 transition-opacity border-0">
-                              <span className="material-symbols-outlined text-[20px]">refresh</span>
-                              Sync All
-                            </button>
-                          </div>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-left">
-                            <thead>
-                              <tr className="bg-surface-container-low border-b border-outline-variant">
-                                <th className="px-lg py-md font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Filename</th>
-                                <th className="px-lg py-md font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Upload Date</th>
-                                <th className="px-lg py-md font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Page Count</th>
-                                <th className="px-lg py-md font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Status</th>
-                                <th className="px-lg py-md font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider text-right">Actions</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-outline-variant">
-                              {documents.length === 0 && (
-                                <tr>
-                                  <td className="px-lg py-md text-on-surface-variant" colSpan={5}>No documents found. Upload PDFs to populate the knowledge base.</td>
-                                </tr>
-                              )}
-                              {documents.map((doc) => {
-                                const statusLower = String(doc.status || '').toLowerCase();
-                                const isIndexed = statusLower.includes('index');
-                                const isProcessing = statusLower.includes('process');
-                                const isError = statusLower.includes('error');
-
-                                const statusClass = isIndexed
-                                  ? 'bg-green-100 text-green-700'
-                                  : isProcessing
-                                    ? 'bg-blue-100 text-blue-700'
-                                    : isError
-                                      ? 'bg-red-100 text-red-700'
-                                      : 'bg-slate-100 text-slate-700';
-
-                                const dotClass = isIndexed
-                                  ? 'bg-green-500'
-                                  : isProcessing
-                                    ? 'bg-blue-500 animate-pulse'
-                                    : isError
-                                      ? 'bg-red-500'
-                                      : 'bg-slate-500';
-
-                                return (
-                                  <tr key={doc._id} className="hover:bg-surface-container-lowest transition-colors">
-                                    <td className="px-lg py-md">
-                                      <div className="flex items-center gap-md">
-                                        <div className="w-10 h-10 bg-error-container text-on-error-container rounded flex items-center justify-center">
-                                          <span className="material-symbols-outlined">picture_as_pdf</span>
-                                        </div>
-                                        <div>
-                                          <div className="font-body-md font-semibold text-on-surface">{doc.originalName}</div>
-                                          <div className="font-label-sm text-label-sm text-on-surface-variant">Chunks: {doc.chunkCount || 0}</div>
-                                        </div>
-                                      </div>
-                                    </td>
-                                    <td className="px-lg py-md font-body-md text-on-surface-variant">{new Date(doc.createdAt || Date.now()).toLocaleDateString()}</td>
-                                    <td className="px-lg py-md font-body-md text-on-surface-variant">{doc.pageCount || 0} Pages</td>
-                                    <td className="px-lg py-md">
-                                      <span className={`px-3 py-1 rounded-full font-label-sm text-label-sm flex items-center w-fit gap-1 ${statusClass}`}>
-                                        <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} /> {doc.status || 'Unknown'}
-                                      </span>
-                                    </td>
-                                    <td className="px-lg py-md text-right">
-                                      <div className="flex justify-end gap-sm">
-                                        <button type="button" className="p-2 hover:bg-surface-container rounded-lg transition-colors text-on-surface-variant border-0 bg-transparent" title="Reindex" onClick={() => reindexDocument(doc._id)}><span className="material-symbols-outlined">sync</span></button>
-                                        <button type="button" className="p-2 hover:bg-error-container rounded-lg transition-colors text-error border-0 bg-transparent" title="Delete" onClick={() => removeDocument(doc._id)}><span className="material-symbols-outlined">delete</span></button>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                        <div className="p-md border-t border-outline-variant flex items-center justify-between bg-surface-container-low">
-                          <span className="font-label-sm text-label-sm text-on-surface-variant">Showing {documents.length ? `1-${documents.length}` : '0'} of {documents.length} documents</span>
-                          <div className="flex gap-xs">
-                            <button type="button" className="p-2 hover:bg-surface-container rounded-lg transition-colors disabled:opacity-30" disabled><span className="material-symbols-outlined">chevron_left</span></button>
-                            <button type="button" className="p-2 hover:bg-surface-container rounded-lg transition-colors" disabled><span className="material-symbols-outlined">chevron_right</span></button>
-                          </div>
-                        </div>
-                      </section>
-
-                      <div className="relative w-full h-[300px] rounded-2xl overflow-hidden shadow-xl border border-outline-variant">
-                        <div className="absolute inset-0 bg-gradient-to-br from-primary-container via-primary to-inverse-surface mix-blend-multiply opacity-90" />
-                        <img alt="AI Background" className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAHKo4nX6C-8A28eWl5qh-ymOolGwYeqG07cU660pIqpCsb5fqAcZD7tffPPaEyucG6ACojesCrPDs54uN9grq32Gf5Ju8-4CdyGhBrO4COKizKsgFTK1Y9kNLq3s2TZg49P-rjxYdKeNJAVpcUok-iuPwiRV2mpDoyThF8wb2JnxwK-B8wsjWTcEr6yPoetoVN6FPRv_JVKowY3sJiL6WbLnbJZiajeqkUsMTE5M41nK4DB1RsOVtMvANFyZNwWugL_a4EgKCYwUKp" />
-                        <div className="absolute inset-0 flex flex-col justify-center items-center text-center p-xl gap-md text-white">
-                          <div className="bg-white/20 backdrop-blur-md px-lg py-sm rounded-full font-label-sm text-label-sm tracking-widest uppercase">Operational Status: Optimal</div>
-                          <h2 className="font-h1 text-h1 max-w-xl">Intelligent SOP Indexing Engine</h2>
-                          <p className="font-body-lg text-body-lg max-w-2xl opacity-90">Your documents are processed using multi-vector embedding models for hyper-accurate conversational retrieval.</p>
-                        </div>
-                      </div>
-                    </main>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {tab === 'billing' && (
-              <div className="bg-surface-container-lowest p-lg rounded-xl border border-outline-variant shadow-sm">
-                <div className="flex items-center justify-between mb-md">
-                  <div>
-                    <h2 className="font-h3 text-h3">Billing & Plans</h2>
-                    <p className="font-label-sm text-label-sm text-on-surface-variant">Manage subscriptions and billing portal access</p>
-                  </div>
-                  <div className="font-label-sm text-label-sm text-on-surface-variant">Plan: {auth?.user?.planTier || 'free'}</div>
-                </div>
-
-                <div className="button-row mb-md">
-                  <button type="button" className="px-md py-sm bg-primary text-on-primary rounded-lg" onClick={createCheckout}>Create Checkout</button>
-                  <button type="button" className="px-md py-sm border border-outline-variant rounded-lg" onClick={openPortal}>Open Portal</button>
-                </div>
-
-                {billingInfo && (
-                  <div className="bg-white p-md rounded-lg border border-outline-variant">
-                    <pre className="text-sm">{JSON.stringify(billingInfo, null, 2)}</pre>
-                  </div>
-                )}
-              </div>
-            )}
-          </section>
-        </main>
-      )}
-
-      {auth && <footer className="status-bar">Status: {status}</footer>}
+      {/* Main */}
+      <main className="main-content">
+        {tab === 'chat' && (
+          <ChatView
+            auth={auth}
+            sessionId={sessionId} setSessionId={setSessionId}
+            messages={messages} setMessages={setMessages}
+            streaming={streaming} setStreaming={setStreaming}
+            setStatus={setStatus}
+            onSessionsChange={refreshSessions}
+          />
+        )}
+        {tab === 'admin' && isAdmin && (
+          <AdminView
+            auth={auth}
+            documents={documents}
+            onRefresh={() => refreshDocuments()}
+            setStatus={setStatus}
+          />
+        )}
+        {tab === 'billing' && (
+          <BillingView auth={auth} setStatus={setStatus} />
+        )}
+      </main>
     </div>
   );
 }
