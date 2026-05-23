@@ -25,6 +25,51 @@ export async function retrieveRelevantChunks(query, options = {}) {
   const scoreThreshold = Number(options.scoreThreshold || 0.2);
 
   const queryVector = await generateEmbedding(query);
+  // If Atlas vector search is enabled, use a DB-side kNN for efficiency.
+  if (String(process.env.USE_ATLAS_VECTOR_SEARCH).toLowerCase() === 'true') {
+    try {
+      // Use MongoDB Atlas $search with knnBeta when available. This stage
+      // requires an Atlas Search index on the `vector` field.
+      const pipeline = [
+        {
+          $search: {
+            knnBeta: {
+              vector: queryVector,
+              path: 'vector',
+              k: limit,
+            },
+          },
+        },
+        {
+          $project: {
+            chunkText: 1,
+            page: 1,
+            section: 1,
+            filename: 1,
+            score: { $meta: 'searchScore' },
+          },
+        },
+      ];
+
+      const results = await Embedding.aggregate(pipeline).allowDiskUse(true).exec();
+
+      // Normalize score (searchScore is not a cosine; still filter by threshold)
+      const filtered = (results || []).filter((r) => (r.score || 0) >= scoreThreshold).slice(0, limit);
+      return filtered.map((r) => ({
+        chunkText: r.chunkText,
+        page: r.page,
+        section: r.section,
+        filename: r.filename,
+        score: r.score,
+      }));
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn('Atlas vector search failed, falling back to local search:', error?.message || error);
+      // fall through to local cosine-based search
+    }
+  }
+
+  // Local in-process retrieval (fallback)
   const candidates = await Embedding.find({}, {
     chunkText: 1,
     page: 1,
